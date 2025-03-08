@@ -1,0 +1,357 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Station Media Slider</title>
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            height: 100%;
+            overflow: hidden;
+            background-color: black;
+        }
+
+        .slider-container {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            width: 100vw;
+            position: relative;
+        }
+
+        .media-element {
+            height: 100%;
+            width: 100%;
+            display: none;
+            position: absolute;
+            top: 0;
+            left: 0;
+            object-fit: cover;
+            transition: opacity 0.5s ease-in-out;
+        }
+
+        .media-element.pdf {
+            width: 80%;
+            left: 10%;
+            object-fit: contain;
+        }
+
+        .media-element.image {
+        object-fit: cover;
+        transform:rotate(90deg);
+        }
+
+        .media-element.active {
+            display: block;
+            opacity: 1;
+        }
+
+        .media-element.fade-out {
+            opacity: 0;
+        }
+
+        .overlay-text {
+            position: fixed;
+            top: 88%;
+            right: 2%;
+            margin-right: 20px;
+            text-align: center;
+            transform: translateY(-50%) rotate(90deg);
+            transform-origin: right center;
+            background-color: darkblue;
+            color: white;
+            white-space: nowrap;
+            z-index: 10;
+            font-size: 42px;
+            width: 550px;
+            padding: 10px;
+            border-radius: 5px;
+        }
+
+        .connection-status {
+            position: fixed;
+            top: 10px;
+            right: 10px;
+            padding: 5px 10px;
+            border-radius: 5px;
+            color: white;
+            font-size: 14px;
+            opacity: 0;
+            transition: opacity 0.3s ease-in-out;
+        }
+
+        .connection-status.visible {
+            opacity: 1;
+        }
+
+        .connection-status.connected {
+            background-color: #28a745;
+        }
+
+        .connection-status.disconnected {
+            background-color: #dc3545;
+        }
+
+        .connection-status.reconnecting {
+            background-color: #ffc107;
+        }
+    </style>
+</head>
+<body>
+    <div class="slider-container" id="slider-container"></div>
+    <div id="overlay-text" class="overlay-text"></div>
+    <div id="product-info" class="overlay-text"></div>
+    <div id="connection-status" class="connection-status">Connection Status</div>
+
+    <script>
+        class MediaSlider {
+            constructor(stationId) {
+                this.stationId = stationId;
+                this.currentIndex = 0;
+                this.mediaElements = [];
+                this.mediaData = [];
+                this.slideshowTimer = null;
+                this.eventSource = null;
+                this.reconnectAttempts = 0;
+                this.maxReconnectAttempts = 5;
+                this.reconnectDelay = 5000;
+                this.containerElement = document.getElementById('slider-container');
+                this.productInfoElement = document.getElementById('product-info');
+                this.statusElement = document.getElementById('connection-status');
+                
+                this.initializeEventSource();
+            }
+
+            initializeEventSource() {
+                if (this.eventSource) {
+                    this.eventSource.close();
+                }
+
+                this.eventSource = new EventSource(`/station/${this.stationId}/stream/`);
+                this.setupEventListeners();
+                this.updateConnectionStatus('connected', 'Connected');
+            }
+
+            setupEventListeners() {
+                this.eventSource.onmessage = (event) => {
+                    try {
+                        const data = JSON.parse(event.data);
+                        this.updateMedia(data);
+                        this.reconnectAttempts = 0;
+                    } catch (error) {
+                        console.error('Error parsing SSE data:', error);
+                    }
+                };
+
+                this.eventSource.onerror = (error) => {
+                    console.error('EventSource error:', error);
+                    this.handleConnectionError();
+                };
+
+                this.eventSource.onopen = () => {
+                    this.updateConnectionStatus('connected', 'Connected');
+                    this.reconnectAttempts = 0;
+                };
+            }
+
+            updateConnectionStatus(status, message) {
+                this.statusElement.className = `connection-status ${status} visible`;
+                this.statusElement.textContent = message;
+                
+                if (status === 'connected') {
+                    setTimeout(() => {
+                        this.statusElement.classList.remove('visible');
+                    }, 3000);
+                }
+            }
+
+            handleConnectionError() {
+                this.eventSource.close();
+                this.updateConnectionStatus('disconnected', 'Connection Lost');
+
+                if (this.reconnectAttempts < this.maxReconnectAttempts) {
+                    this.reconnectAttempts++;
+                    this.updateConnectionStatus('reconnecting', 
+                        `Reconnecting (Attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})...`);
+                    
+                    setTimeout(() => {
+                        this.initializeEventSource();
+                    }, this.reconnectDelay);
+                } else {
+                    this.updateConnectionStatus('disconnected', 'Connection Failed - Refreshing Page...');
+                    setTimeout(() => {
+                        window.location.reload();
+                    }, 3000);
+                }
+            }
+
+            updateMedia(data) {
+                if (!data.media || data.media.length === 0) {
+                    console.warn('No media data received');
+                    return;
+                }
+
+                this.mediaData = data.media;
+
+                const currentUrls = this.mediaElements.map(el => el.src);
+                const newUrls = data.media.map(m => m.url);
+
+                if (JSON.stringify(currentUrls) !== JSON.stringify(newUrls)) {
+                    this.clearCurrentMedia();
+                    this.createNewMediaElements(data.media);
+                    this.playCurrentMedia();
+                    this.updateProductInfo();
+                }
+            }
+
+            clearCurrentMedia() {
+                if (this.slideshowTimer) {
+                    clearTimeout(this.slideshowTimer);
+                }
+                this.stopCurrentMedia();
+                this.containerElement.innerHTML = '';
+                this.mediaElements = [];
+                this.currentIndex = 0;
+            }
+
+            createNewMediaElements(mediaData) {
+                mediaData.forEach((media, index) => {
+                    const mediaElement = this.createMediaElement(media, index);
+                    if (mediaElement) {
+                        this.containerElement.appendChild(mediaElement);
+                        this.mediaElements.push(mediaElement);
+                    }
+                });
+            }
+
+            createMediaElement(media, index) {
+                let element;
+                const type = media.type.toLowerCase();
+                
+                // Store media info as a data attribute to ensure we have it available
+                const mediaInfoAttribute = JSON.stringify({
+                    product_code: media.product_code,
+                    product_name: media.product_name
+                });
+
+                if (['mp4', 'mov'].includes(type)) {
+                    element = document.createElement('video');
+                    element.src = media.url;
+                    element.className = 'media-element';
+                    element.controls = false;
+                    element.loop = false;
+                    element.muted = true;
+                    element.playsInline = true;
+                    element.dataset.mediaInfo = mediaInfoAttribute;
+                    element.addEventListener('ended', () => this.switchMedia());
+                    element.addEventListener('error', (e) => this.handleMediaError(e));
+                } else if (type === 'pdf') {
+                    element = document.createElement('embed');
+                    element.src = media.url + '#toolbar=0';
+                    element.className = 'media-element pdf';
+                    element.type = 'application/pdf';
+                    element.dataset.mediaInfo = mediaInfoAttribute;
+                } else if (['jpg', 'jpeg', 'png', 'gif'].includes(type)) {
+                    element = document.createElement('img');
+                    element.src = media.url;
+                    element.className = 'media-element image';
+                    element.alt = `${media.product_code} - ${media.product_name}`;
+                    element.dataset.mediaInfo = mediaInfoAttribute;
+                    element.addEventListener('error', (e) => this.handleMediaError(e));
+                } else {
+                    console.warn(`Unsupported media type: ${type}`);
+                    return null;
+                }
+
+                element.dataset.duration = media.duration * 1000;
+                element.className += index === 0 ? ' active' : '';
+                return element;
+            }
+
+            handleMediaError(error) {
+                console.error('Media error:', error);
+                this.switchMedia();
+            }
+
+            playCurrentMedia() {
+                const currentMedia = this.mediaElements[this.currentIndex];
+                if (!currentMedia) return;
+
+                let duration = parseInt(currentMedia.dataset.duration) || 10000;
+
+                if (currentMedia.tagName === 'VIDEO') {
+                    currentMedia.play().catch(error => {
+                        console.error('Error playing video:', error);
+                        this.switchMedia();
+                    });
+                } else {
+                    this.slideshowTimer = setTimeout(() => this.switchMedia(), duration);
+                }
+                
+                this.updateProductInfo();
+            }
+
+            stopCurrentMedia() {
+                const currentMedia = this.mediaElements[this.currentIndex];
+                if (!currentMedia) return;
+
+                if (currentMedia.tagName === 'VIDEO') {
+                    currentMedia.pause();
+                    currentMedia.currentTime = 0;
+                }
+                clearTimeout(this.slideshowTimer);
+            }
+
+            updateProductInfo() {
+                if (!this.mediaData || this.mediaData.length === 0 || this.currentIndex >= this.mediaData.length) {
+                    console.warn('No media data available for product info');
+                    return;
+                }
+                
+                const currentMediaData = this.mediaData[this.currentIndex];
+                console.log('Updating product info:', currentMediaData);
+                
+                // Make sure we have the product information
+                if (currentMediaData && currentMediaData.product_code && currentMediaData.product_name) {
+                    const productInfo = `${currentMediaData.product_code} - ${currentMediaData.product_name}`;
+                    this.productInfoElement.textContent = productInfo;
+                    console.log('Set product info text to:', productInfo);
+                    
+                    // Make sure the element is visible
+                    this.productInfoElement.style.display = 'block';
+                    this.productInfoElement.style.opacity = '1';
+                } else {
+                    console.warn('Missing product information for current media item');
+                }
+            }
+            
+            switchMedia() {
+                const currentMedia = this.mediaElements[this.currentIndex];
+                if (!currentMedia) return;
+
+                currentMedia.classList.add('fade-out');
+                currentMedia.classList.remove('active');
+                
+                this.stopCurrentMedia();
+                this.currentIndex = (this.currentIndex + 1) % this.mediaElements.length;
+                
+                const nextMedia = this.mediaElements[this.currentIndex];
+                if (nextMedia) {
+                    nextMedia.classList.remove('fade-out');
+                    nextMedia.classList.add('active');
+                    this.playCurrentMedia();
+                    this.updateProductInfo();
+                }
+            }
+        }
+
+        document.addEventListener('DOMContentLoaded', () => {
+            const stationId = '{{ station.id }}';
+            new MediaSlider(stationId);
+        });
+    </script>
+</body>
+</html>
